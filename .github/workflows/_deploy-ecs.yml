@@ -1,0 +1,613 @@
+# Optima ECS Deployment Reusable Workflow
+#
+# 使用方法：
+#   jobs:
+#     deploy:
+#       uses: Optima-Chat/optima-workflows/.github/workflows/_deploy-ecs.yml@main
+#       with:
+#         service_name: comfy-mcp
+#         environment: ${{ inputs.environment || 'stage' }}
+#       secrets: inherit
+
+name: _deploy-ecs
+
+on:
+  workflow_call:
+    inputs:
+      # === 必填参数 ===
+      service_name:
+        description: '服务名称（如 user-auth, comfy-mcp）'
+        required: true
+        type: string
+
+      # === 环境控制 ===
+      environment:
+        description: '部署环境 (stage/prod/both)'
+        required: true
+        type: string
+      skip_build:
+        description: '跳过构建（使用 latest 镜像）'
+        required: false
+        type: boolean
+        default: false
+      image_tag:
+        description: '镜像 tag（为空则自动生成）'
+        required: false
+        type: string
+        default: ''
+
+      # === 功能开关 ===
+      has_tests:
+        description: '是否运行测试'
+        type: boolean
+        default: false
+      skip_tests:
+        description: '本次跳过测试'
+        type: boolean
+        default: false
+      has_migration:
+        description: '是否需要数据库迁移'
+        type: boolean
+        default: false
+      skip_migration:
+        description: '本次跳过迁移'
+        type: boolean
+        default: false
+
+      # === 多镜像支持 ===
+      images:
+        description: 'JSON 数组配置多镜像，如 [{"name":"user-auth","dockerfile":"Dockerfile"}]'
+        type: string
+        default: '[]'
+
+      # === 健康检查 ===
+      health_check_path:
+        description: '健康检查路径'
+        type: string
+        default: '/health'
+      stage_domain:
+        description: 'Stage 域名（不含 https://）'
+        type: string
+        default: ''
+      prod_domain:
+        description: 'Prod 域名（不含 https://）'
+        type: string
+        default: ''
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: 585891120210.dkr.ecr.ap-southeast-1.amazonaws.com
+  STAGE_CLUSTER: optima-stage-cluster
+  PROD_CLUSTER: optima-prod-cluster
+
+jobs:
+  # ==============================================================================
+  # Check Trigger: 确定部署参数
+  # ==============================================================================
+  check-trigger:
+    name: Check Parameters
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.check.outputs.environment }}
+      skip_build: ${{ steps.check.outputs.skip_build }}
+      skip_tests: ${{ steps.check.outputs.skip_tests }}
+      skip_migration: ${{ steps.check.outputs.skip_migration }}
+      image_tag: ${{ steps.check.outputs.image_tag }}
+      deploy_stage: ${{ steps.check.outputs.deploy_stage }}
+      deploy_prod: ${{ steps.check.outputs.deploy_prod }}
+      stage_domain: ${{ steps.check.outputs.stage_domain }}
+      prod_domain: ${{ steps.check.outputs.prod_domain }}
+    steps:
+      - name: Determine deployment parameters
+        id: check
+        run: |
+          ENVIRONMENT="${{ inputs.environment }}"
+          SKIP_BUILD="${{ inputs.skip_build }}"
+          SKIP_TESTS="${{ inputs.skip_tests }}"
+          SKIP_MIGRATION="${{ inputs.skip_migration }}"
+          DEPLOY_STAGE="false"
+          DEPLOY_PROD="false"
+
+          # 确定镜像 tag
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          elif [[ "$SKIP_BUILD" == "true" ]]; then
+            IMAGE_TAG="latest"
+          else
+            IMAGE_TAG="deploy-$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+
+          # 确定部署目标
+          if [[ "$ENVIRONMENT" == "both" ]]; then
+            DEPLOY_STAGE="true"
+            DEPLOY_PROD="true"
+            echo "🔄 Deploying to BOTH environments"
+          elif [[ "$ENVIRONMENT" == "prod" ]]; then
+            DEPLOY_PROD="true"
+            echo "🚀 Deploying to PROD"
+          else
+            DEPLOY_STAGE="true"
+            echo "🧪 Deploying to STAGE"
+          fi
+
+          # 确定健康检查域名
+          SERVICE="${{ inputs.service_name }}"
+          if [[ -n "${{ inputs.stage_domain }}" ]]; then
+            STAGE_DOMAIN="${{ inputs.stage_domain }}"
+          else
+            # 默认域名规则：service-name -> service-name.stage.optima.onl
+            # 特殊处理：xxx-mcp -> xxx.mcp.stage.optima.onl
+            if [[ "$SERVICE" == *-mcp ]]; then
+              PREFIX="${SERVICE%-mcp}"
+              STAGE_DOMAIN="${PREFIX}.mcp.stage.optima.onl"
+            else
+              STAGE_DOMAIN="${SERVICE}.stage.optima.onl"
+            fi
+          fi
+
+          if [[ -n "${{ inputs.prod_domain }}" ]]; then
+            PROD_DOMAIN="${{ inputs.prod_domain }}"
+          else
+            if [[ "$SERVICE" == *-mcp ]]; then
+              PREFIX="${SERVICE%-mcp}"
+              PROD_DOMAIN="${PREFIX}.mcp.optima.onl"
+            else
+              PROD_DOMAIN="${SERVICE}.optima.onl"
+            fi
+          fi
+
+          # 输出
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "skip_build=$SKIP_BUILD" >> $GITHUB_OUTPUT
+          echo "skip_tests=$SKIP_TESTS" >> $GITHUB_OUTPUT
+          echo "skip_migration=$SKIP_MIGRATION" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "deploy_stage=$DEPLOY_STAGE" >> $GITHUB_OUTPUT
+          echo "deploy_prod=$DEPLOY_PROD" >> $GITHUB_OUTPUT
+          echo "stage_domain=$STAGE_DOMAIN" >> $GITHUB_OUTPUT
+          echo "prod_domain=$PROD_DOMAIN" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=== Deployment Parameters ==="
+          echo "Service: $SERVICE"
+          echo "Environment: $ENVIRONMENT"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "Skip Build: $SKIP_BUILD"
+          echo "Skip Tests: $SKIP_TESTS"
+          echo "Skip Migration: $SKIP_MIGRATION"
+          echo "Deploy Stage: $DEPLOY_STAGE"
+          echo "Deploy Prod: $DEPLOY_PROD"
+          echo "Stage Domain: $STAGE_DOMAIN"
+          echo "Prod Domain: $PROD_DOMAIN"
+
+  # ==============================================================================
+  # Test: 运行测试（可选）
+  # ==============================================================================
+  test:
+    name: Run Tests
+    needs: check-trigger
+    if: |
+      inputs.has_tests == true &&
+      needs.check-trigger.outputs.skip_tests != 'true'
+    runs-on: ${{ needs.check-trigger.outputs.deploy_prod == 'true' && 'optima-prod-host' || 'optima-stage-host' }}
+    concurrency:
+      group: test-${{ inputs.service_name }}-${{ github.head_ref || github.sha }}
+      cancel-in-progress: true
+
+    container:
+      image: python:3.11-slim
+      options: --user root
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y postgresql-client
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run linting
+        run: |
+          black --check --diff src/ || true
+          isort --check-only --diff src/ || true
+          flake8 src/ || true
+
+      - name: Run type checking
+        run: |
+          mypy src/ --explicit-package-bases || true
+
+      - name: Set up test database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/test_db
+          PGPASSWORD: postgres
+        run: |
+          psql -h postgres -U postgres -d postgres -c "DROP DATABASE IF EXISTS test_db;"
+          psql -h postgres -U postgres -d postgres -c "CREATE DATABASE test_db;"
+          alembic upgrade head || echo "No migrations to run"
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/test_db
+          APP_ENV: test
+        run: |
+          pytest tests/ -v --cov=src --cov-report=term-missing -m "not docker and not integration" || true
+
+  # ==============================================================================
+  # Build: 构建镜像并推送到 ECR
+  # ==============================================================================
+  build:
+    name: Build Docker Image
+    needs: [check-trigger, test]
+    if: |
+      always() &&
+      needs.check-trigger.outputs.skip_build != 'true' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: optima-stage-host
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          IMAGE_TAG: ${{ needs.check-trigger.outputs.image_tag }}
+          DEPLOY_STAGE: ${{ needs.check-trigger.outputs.deploy_stage }}
+          DEPLOY_PROD: ${{ needs.check-trigger.outputs.deploy_prod }}
+          DOCKER_BUILDKIT: 1
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          STAGE_REPO="${SERVICE_NAME}-stage-ecs"
+          PROD_REPO="${SERVICE_NAME}-prod-ecs"
+
+          docker buildx create --use --name mybuilder --driver docker-container 2>/dev/null || docker buildx use mybuilder
+
+          echo "🔨 Building image for ${SERVICE_NAME}..."
+          docker buildx build \
+            --build-arg INSTALL_INFISICAL=true \
+            --build-arg USE_CHINA_MIRROR=true \
+            --cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache \
+            --cache-to type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache,mode=max \
+            --load \
+            -t local-build:latest \
+            .
+
+          # 推送到 stage ECR
+          if [[ "$DEPLOY_STAGE" == "true" ]]; then
+            echo "📤 Pushing to STAGE ECR..."
+            docker tag local-build:latest ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$IMAGE_TAG
+            docker tag local-build:latest ${{ env.ECR_REGISTRY }}/$STAGE_REPO:latest
+            docker tag local-build:latest ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$SHORT_SHA
+            docker push ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$IMAGE_TAG
+            docker push ${{ env.ECR_REGISTRY }}/$STAGE_REPO:latest
+            docker push ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$SHORT_SHA
+          fi
+
+          # 推送到 prod ECR
+          if [[ "$DEPLOY_PROD" == "true" ]]; then
+            echo "📤 Pushing to PROD ECR..."
+            docker tag local-build:latest ${{ env.ECR_REGISTRY }}/$PROD_REPO:$IMAGE_TAG
+            docker tag local-build:latest ${{ env.ECR_REGISTRY }}/$PROD_REPO:latest
+            docker tag local-build:latest ${{ env.ECR_REGISTRY }}/$PROD_REPO:$SHORT_SHA
+            docker push ${{ env.ECR_REGISTRY }}/$PROD_REPO:$IMAGE_TAG
+            docker push ${{ env.ECR_REGISTRY }}/$PROD_REPO:latest
+            docker push ${{ env.ECR_REGISTRY }}/$PROD_REPO:$SHORT_SHA
+          fi
+
+          echo "✅ Build and push completed"
+
+  # ==============================================================================
+  # Deploy Stage
+  # ==============================================================================
+  deploy-stage:
+    name: Deploy to Stage
+    needs: [check-trigger, build]
+    if: |
+      always() &&
+      needs.check-trigger.outputs.deploy_stage == 'true' &&
+      (needs.build.result == 'success' || needs.check-trigger.outputs.skip_build == 'true')
+    runs-on: optima-stage-host
+    concurrency:
+      group: deploy-${{ inputs.service_name }}-stage
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Database migration (if enabled)
+      - name: Load network config from SSM
+        if: inputs.has_migration == true && needs.check-trigger.outputs.skip_migration != 'true'
+        run: |
+          SSM_PREFIX="/optima/stage/ecs"
+
+          echo "📡 Loading network config from SSM ($SSM_PREFIX)..."
+
+          SUBNET_IDS=$(aws ssm get-parameter \
+            --name $SSM_PREFIX/subnet-ids \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+
+          SECURITY_GROUP_ID=$(aws ssm get-parameter \
+            --name $SSM_PREFIX/tasks-sg-id \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+
+          echo "SUBNET_IDS=$SUBNET_IDS" >> $GITHUB_ENV
+          echo "SECURITY_GROUP_ID=$SECURITY_GROUP_ID" >> $GITHUB_ENV
+
+          echo "✅ Network config loaded"
+
+      - name: Run database migration
+        if: inputs.has_migration == true && needs.check-trigger.outputs.skip_migration != 'true'
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          echo "🔄 Running database migration..."
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.STAGE_CLUSTER }} \
+            --task-definition ${SERVICE_NAME}-migration-stage \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ env.SUBNET_IDS }}],securityGroups=[${{ env.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "⏳ Waiting for migration task: $TASK_ARN"
+
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.STAGE_CLUSTER }} \
+            --tasks $TASK_ARN \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.STAGE_CLUSTER }} \
+            --tasks $TASK_ARN \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "❌ Migration failed with exit code: $EXIT_CODE"
+            exit 1
+          fi
+
+          echo "✅ Migration completed successfully"
+
+      - name: Export Task Definition
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${SERVICE_NAME}-stage \
+            --query taskDefinition \
+            --region ${{ env.AWS_REGION }} > task-def.json
+
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            task-def.json > task-definition.json
+
+      - name: Render Task Definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ inputs.service_name }}
+          image: ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}-stage-ecs:${{ needs.check-trigger.outputs.image_tag }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ inputs.service_name }}-stage
+          cluster: ${{ env.STAGE_CLUSTER }}
+          wait-for-service-stability: false
+
+      - name: Health check
+        env:
+          HEALTH_URL: https://${{ needs.check-trigger.outputs.stage_domain }}${{ inputs.health_check_path }}
+        run: |
+          echo "Checking health at: $HEALTH_URL"
+          for i in {1..30}; do
+            if curl -f -s "$HEALTH_URL" > /dev/null; then
+              echo "✅ Stage health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i/30: Service not ready yet..."
+            sleep 10
+          done
+          echo "❌ Health check failed"
+          exit 1
+
+  # ==============================================================================
+  # Deploy Prod
+  # ==============================================================================
+  deploy-prod:
+    name: Deploy to Prod
+    needs: [check-trigger, build]
+    if: |
+      always() &&
+      needs.check-trigger.outputs.deploy_prod == 'true' &&
+      (needs.build.result == 'success' || needs.check-trigger.outputs.skip_build == 'true')
+    runs-on: optima-prod-host
+    environment: aws-ec2-1az-prod
+    concurrency:
+      group: deploy-${{ inputs.service_name }}-prod
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Database migration (if enabled)
+      - name: Load network config from SSM
+        if: inputs.has_migration == true && needs.check-trigger.outputs.skip_migration != 'true'
+        run: |
+          SSM_PREFIX="/optima/prod/ecs"
+
+          echo "📡 Loading network config from SSM ($SSM_PREFIX)..."
+
+          SUBNET_IDS=$(aws ssm get-parameter \
+            --name $SSM_PREFIX/subnet-ids \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+
+          SECURITY_GROUP_ID=$(aws ssm get-parameter \
+            --name $SSM_PREFIX/tasks-sg-id \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+
+          echo "SUBNET_IDS=$SUBNET_IDS" >> $GITHUB_ENV
+          echo "SECURITY_GROUP_ID=$SECURITY_GROUP_ID" >> $GITHUB_ENV
+
+          echo "✅ Network config loaded"
+
+      - name: Run database migration
+        if: inputs.has_migration == true && needs.check-trigger.outputs.skip_migration != 'true'
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          echo "🔄 Running database migration..."
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.PROD_CLUSTER }} \
+            --task-definition ${SERVICE_NAME}-migration-prod \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ env.SUBNET_IDS }}],securityGroups=[${{ env.SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "⏳ Waiting for migration task: $TASK_ARN"
+
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.PROD_CLUSTER }} \
+            --tasks $TASK_ARN \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.PROD_CLUSTER }} \
+            --tasks $TASK_ARN \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "❌ Migration failed with exit code: $EXIT_CODE"
+            exit 1
+          fi
+
+          echo "✅ Migration completed successfully"
+
+      - name: Export Task Definition
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${SERVICE_NAME}-prod \
+            --query taskDefinition \
+            --region ${{ env.AWS_REGION }} > task-def.json
+
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            task-def.json > task-definition.json
+
+      - name: Render Task Definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ inputs.service_name }}
+          image: ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}-prod-ecs:${{ needs.check-trigger.outputs.image_tag }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ inputs.service_name }}-prod
+          cluster: ${{ env.PROD_CLUSTER }}
+          wait-for-service-stability: false
+
+      - name: Health check
+        env:
+          HEALTH_URL: https://${{ needs.check-trigger.outputs.prod_domain }}${{ inputs.health_check_path }}
+        run: |
+          echo "Checking health at: $HEALTH_URL"
+          for i in {1..30}; do
+            if curl -f -s "$HEALTH_URL" > /dev/null; then
+              echo "✅ Prod health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i/30: Service not ready yet..."
+            sleep 10
+          done
+          echo "❌ Health check failed"
+          exit 1
+
+  # ==============================================================================
+  # Summary
+  # ==============================================================================
+  summary:
+    name: Deployment Summary
+    needs: [check-trigger, test, build, deploy-stage, deploy-prod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "=== Deployment Summary ==="
+          echo "Service: ${{ inputs.service_name }}"
+          echo "Environment: ${{ needs.check-trigger.outputs.environment }}"
+          echo "Image Tag: ${{ needs.check-trigger.outputs.image_tag }}"
+          echo ""
+          echo "Results:"
+          echo "  Test:  ${{ needs.test.result || 'skipped' }}"
+          echo "  Build: ${{ needs.build.result || 'skipped' }}"
+          echo "  Stage: ${{ needs.deploy-stage.result || 'skipped' }}"
+          echo "  Prod:  ${{ needs.deploy-prod.result || 'skipped' }}"
+          echo ""
+          if [[ "${{ needs.check-trigger.outputs.deploy_stage }}" == "true" ]]; then
+            echo "Stage URL: https://${{ needs.check-trigger.outputs.stage_domain }}"
+          fi
+          if [[ "${{ needs.check-trigger.outputs.deploy_prod }}" == "true" ]]; then
+            echo "Prod URL: https://${{ needs.check-trigger.outputs.prod_domain }}"
+          fi
