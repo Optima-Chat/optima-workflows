@@ -288,6 +288,13 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Download shared docker-entrypoint.sh
+        run: |
+          echo "📥 Downloading shared docker-entrypoint.sh..."
+          curl -fsSL -o docker-entrypoint.sh https://raw.githubusercontent.com/Optima-Chat/optima-workflows/main/shared/docker-entrypoint.sh
+          chmod +x docker-entrypoint.sh
+          echo "✅ docker-entrypoint.sh downloaded"
+
       - name: Build and push Docker image
         env:
           SERVICE_NAME: ${{ inputs.service_name }}
