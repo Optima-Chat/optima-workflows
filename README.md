@@ -141,6 +141,55 @@ jobs:
 | `push: tags/v*` | ❌ | ❌ | ✅ | 发版 |
 | `workflow_dispatch` | 可选 | 可选 | 可选 | 手动控制 |
 
+## 共享资源
+
+### `shared/docker-entrypoint.sh` - 通用 Entrypoint
+
+所有 ECS 服务使用的统一 Docker Entrypoint 脚本，用于从 Infisical 获取密钥。
+
+**使用方法**：
+
+1. 直接复制到你的项目：
+```bash
+curl -o docker-entrypoint.sh https://raw.githubusercontent.com/Optima-Chat/optima-workflows/main/shared/docker-entrypoint.sh
+chmod +x docker-entrypoint.sh
+```
+
+2. 在 Dockerfile 中使用：
+```dockerfile
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["python", "main.py"]
+```
+
+3. 在 ECS Task Definition 中设置环境变量：
+```json
+{
+  "environment": [
+    {"name": "USE_INFISICAL_CLI", "value": "true"},
+    {"name": "INFISICAL_PATH", "value": "/mcp-tools/comfy-mcp"}
+  ]
+}
+```
+
+**必需环境变量**（ECS 模式）：
+
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `USE_INFISICAL_CLI` | 启用 Infisical 模式 | `true` |
+| `INFISICAL_CLIENT_ID` | Machine Identity ID | 从 SSM 获取 |
+| `INFISICAL_CLIENT_SECRET` | Machine Identity Secret | 从 SSM 获取 |
+| `INFISICAL_PROJECT_ID` | 项目 ID | 从 SSM 获取 |
+| `INFISICAL_PATH` | 密钥路径 | `/mcp-tools/comfy-mcp` |
+
+**可选环境变量**：
+
+| 变量 | 默认值 | 说明 |
+|------|-------|------|
+| `INFISICAL_ENVIRONMENT` | `staging` | 环境名称 |
+| `INFISICAL_DOMAIN` | `https://secrets.optima.onl` | Infisical 域名 |
+
 ## 版本
 
 建议锁定到特定 tag 而不是 `@main`：
