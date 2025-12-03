@@ -54,6 +54,12 @@ on:
         type: boolean
         default: false
 
+      # === 构建配置 ===
+      dockerfile:
+        description: 'Dockerfile 路径（默认 Dockerfile）'
+        type: string
+        default: 'Dockerfile'
+
       # === 多镜像支持 ===
       images:
         description: 'JSON 数组配置多镜像，如 [{"name":"user-auth","dockerfile":"Dockerfile"}]'
@@ -310,7 +316,9 @@ jobs:
           docker buildx create --use --name mybuilder --driver docker-container 2>/dev/null || docker buildx use mybuilder
 
           echo "🔨 Building image for ${SERVICE_NAME}..."
+          echo "📄 Using Dockerfile: ${{ inputs.dockerfile }}"
           docker buildx build \
+            -f ${{ inputs.dockerfile }} \
             --build-arg INSTALL_INFISICAL=true \
             --build-arg USE_CHINA_MIRROR=true \
             --cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache \
