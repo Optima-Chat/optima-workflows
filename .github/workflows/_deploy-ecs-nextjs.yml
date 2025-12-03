@@ -317,11 +317,15 @@ jobs:
               done <<< "$STAGE_BUILD_ARGS"
             fi
 
-            # 添加通用构建参数
+            # 添加通用构建参数（与 _deploy-ecs.yml 保持一致）
+            BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             BUILD_ARGS="$BUILD_ARGS --build-arg USE_CHINA_MIRROR=true"
-            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_COMMIT=$SHORT_SHA"
-            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_COMMIT=${{ github.sha }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_BRANCH=${{ github.ref_name }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_DATE=${BUILD_DATE}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg APP_VERSION=${IMAGE_TAG}"
 
+            echo "📝 Build metadata: commit=${{ github.sha }}, branch=${{ github.ref_name }}, date=${BUILD_DATE}"
             echo "Build args: $BUILD_ARGS"
 
             docker buildx build \
@@ -352,11 +356,15 @@ jobs:
               done <<< "$PROD_BUILD_ARGS"
             fi
 
-            # 添加通用构建参数
+            # 添加通用构建参数（与 _deploy-ecs.yml 保持一致）
+            BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             BUILD_ARGS="$BUILD_ARGS --build-arg USE_CHINA_MIRROR=true"
-            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_COMMIT=$SHORT_SHA"
-            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_COMMIT=${{ github.sha }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_BRANCH=${{ github.ref_name }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_DATE=${BUILD_DATE}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg APP_VERSION=${IMAGE_TAG}"
 
+            echo "📝 Build metadata: commit=${{ github.sha }}, branch=${{ github.ref_name }}, date=${BUILD_DATE}"
             echo "Build args: $BUILD_ARGS"
 
             docker buildx build \
