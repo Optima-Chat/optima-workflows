@@ -313,14 +313,22 @@ jobs:
           STAGE_REPO="${SERVICE_NAME}-stage-ecs"
           PROD_REPO="${SERVICE_NAME}-prod-ecs"
 
+          # 构建时间（ISO 8601 格式）
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
           docker buildx create --use --name mybuilder --driver docker-container 2>/dev/null || docker buildx use mybuilder
 
           echo "🔨 Building image for ${SERVICE_NAME}..."
           echo "📄 Using Dockerfile: ${{ inputs.dockerfile }}"
+          echo "📝 Build metadata: commit=${{ github.sha }}, branch=${{ github.ref_name }}, date=${BUILD_DATE}"
           docker buildx build \
             -f ${{ inputs.dockerfile }} \
             --build-arg INSTALL_INFISICAL=true \
             --build-arg USE_CHINA_MIRROR=true \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --build-arg GIT_BRANCH=${{ github.ref_name }} \
+            --build-arg BUILD_DATE=${BUILD_DATE} \
+            --build-arg APP_VERSION=${IMAGE_TAG} \
             --cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache \
             --cache-to type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache,mode=max \
             --load \
