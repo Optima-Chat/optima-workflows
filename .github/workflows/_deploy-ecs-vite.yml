@@ -1,0 +1,455 @@
+# Optima ECS Deployment Reusable Workflow (Vite)
+#
+# 专为 Vite SPA 应用设计的 ECS 部署工作流
+# 与 Next.js 版 _deploy-ecs-nextjs.yml 的区别:
+#   - 支持 VITE_* 构建时环境变量 (而非 NEXT_PUBLIC_*)
+#   - 无 SSR，纯静态前端
+#   - 无数据库迁移
+#   - 健康检查默认 /
+#
+# 使用方法：
+#   jobs:
+#     deploy:
+#       uses: Optima-Chat/optima-workflows/.github/workflows/_deploy-ecs-vite.yml@main
+#       with:
+#         service_name: ai-shell-web
+#         environment: ${{ inputs.environment || 'stage' }}
+#         dockerfile: deploy/aws/Dockerfile.web-ui
+#         stage_build_args: |
+#           VITE_WS_URL=wss://shell.stage.optima.onl
+#           VITE_API_URL=https://shell.stage.optima.onl
+#         prod_build_args: |
+#           VITE_WS_URL=wss://shell.optima.shop
+#           VITE_API_URL=https://shell.optima.shop
+#       secrets: inherit
+
+name: _deploy-ecs-vite
+
+on:
+  workflow_call:
+    inputs:
+      # === 必填参数 ===
+      service_name:
+        description: '服务名称（如 ai-shell-web）'
+        required: true
+        type: string
+
+      # === 环境控制 ===
+      environment:
+        description: '部署环境 (stage/prod/both)'
+        required: true
+        type: string
+      skip_build:
+        description: '跳过构建（使用 latest 镜像）'
+        required: false
+        type: boolean
+        default: false
+      image_tag:
+        description: '镜像 tag（为空则自动生成）'
+        required: false
+        type: string
+        default: ''
+
+      # === 构建配置 ===
+      dockerfile:
+        description: 'Dockerfile 路径'
+        type: string
+        default: 'Dockerfile'
+      build_context:
+        description: '构建上下文路径（默认 .）'
+        type: string
+        default: '.'
+
+      # === Vite 构建时环境变量 (关键) ===
+      stage_build_args:
+        description: 'Stage 环境的 VITE_* 变量，每行一个 KEY=VALUE'
+        type: string
+        default: ''
+      prod_build_args:
+        description: 'Prod 环境的 VITE_* 变量，每行一个 KEY=VALUE'
+        type: string
+        default: ''
+
+      # === 健康检查 ===
+      health_check_path:
+        description: '健康检查路径（Vite SPA 默认 /）'
+        type: string
+        default: '/'
+      stage_domain:
+        description: 'Stage 域名（不含 https://）'
+        type: string
+        default: ''
+      prod_domain:
+        description: 'Prod 域名（不含 https://）'
+        type: string
+        default: ''
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: 585891120210.dkr.ecr.ap-southeast-1.amazonaws.com
+  STAGE_CLUSTER: optima-stage-cluster
+  PROD_CLUSTER: optima-prod-cluster
+
+jobs:
+  # ==============================================================================
+  # Check Trigger: 确定部署参数
+  # ==============================================================================
+  check-trigger:
+    name: Check Parameters
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.check.outputs.environment }}
+      skip_build: ${{ steps.check.outputs.skip_build }}
+      image_tag: ${{ steps.check.outputs.image_tag }}
+      deploy_stage: ${{ steps.check.outputs.deploy_stage }}
+      deploy_prod: ${{ steps.check.outputs.deploy_prod }}
+      stage_domain: ${{ steps.check.outputs.stage_domain }}
+      prod_domain: ${{ steps.check.outputs.prod_domain }}
+    steps:
+      - name: Determine deployment parameters
+        id: check
+        run: |
+          ENVIRONMENT="${{ inputs.environment }}"
+          SKIP_BUILD="${{ inputs.skip_build }}"
+          DEPLOY_STAGE="false"
+          DEPLOY_PROD="false"
+
+          # 确定镜像 tag
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          elif [[ "$SKIP_BUILD" == "true" ]]; then
+            IMAGE_TAG="latest"
+          else
+            IMAGE_TAG="deploy-$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+
+          # 确定部署目标
+          if [[ "$ENVIRONMENT" == "both" ]]; then
+            DEPLOY_STAGE="true"
+            DEPLOY_PROD="true"
+            echo "🔄 Deploying to BOTH environments"
+          elif [[ "$ENVIRONMENT" == "prod" ]]; then
+            DEPLOY_PROD="true"
+            echo "🚀 Deploying to PROD"
+          else
+            DEPLOY_STAGE="true"
+            echo "🧪 Deploying to STAGE"
+          fi
+
+          # 确定健康检查域名
+          SERVICE="${{ inputs.service_name }}"
+          if [[ -n "${{ inputs.stage_domain }}" ]]; then
+            STAGE_DOMAIN="${{ inputs.stage_domain }}"
+          else
+            STAGE_DOMAIN="${SERVICE}.stage.optima.onl"
+          fi
+
+          if [[ -n "${{ inputs.prod_domain }}" ]]; then
+            PROD_DOMAIN="${{ inputs.prod_domain }}"
+          else
+            PROD_DOMAIN="${SERVICE}.optima.shop"
+          fi
+
+          # 输出
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "skip_build=$SKIP_BUILD" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "deploy_stage=$DEPLOY_STAGE" >> $GITHUB_OUTPUT
+          echo "deploy_prod=$DEPLOY_PROD" >> $GITHUB_OUTPUT
+          echo "stage_domain=$STAGE_DOMAIN" >> $GITHUB_OUTPUT
+          echo "prod_domain=$PROD_DOMAIN" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=== Vite Deployment Parameters ==="
+          echo "Service: $SERVICE"
+          echo "Environment: $ENVIRONMENT"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "Skip Build: $SKIP_BUILD"
+          echo "Deploy Stage: $DEPLOY_STAGE"
+          echo "Deploy Prod: $DEPLOY_PROD"
+          echo "Stage Domain: $STAGE_DOMAIN"
+          echo "Prod Domain: $PROD_DOMAIN"
+
+  # ==============================================================================
+  # Build: 构建 Vite 镜像
+  # ==============================================================================
+  build:
+    name: Build Docker Image
+    needs: check-trigger
+    if: needs.check-trigger.outputs.skip_build != 'true'
+    runs-on: optima-stage-host
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          IMAGE_TAG: ${{ needs.check-trigger.outputs.image_tag }}
+          DEPLOY_STAGE: ${{ needs.check-trigger.outputs.deploy_stage }}
+          DEPLOY_PROD: ${{ needs.check-trigger.outputs.deploy_prod }}
+          STAGE_BUILD_ARGS: ${{ inputs.stage_build_args }}
+          PROD_BUILD_ARGS: ${{ inputs.prod_build_args }}
+          DOCKER_BUILDKIT: 1
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          STAGE_REPO="${SERVICE_NAME}-stage-ecs"
+          PROD_REPO="${SERVICE_NAME}-prod-ecs"
+
+          docker buildx create --use --name mybuilder --driver docker-container 2>/dev/null || docker buildx use mybuilder
+
+          echo "🔨 Building Vite image for ${SERVICE_NAME}..."
+          echo "📄 Using Dockerfile: ${{ inputs.dockerfile }}"
+          echo "📁 Build context: ${{ inputs.build_context }}"
+
+          # Stage 构建
+          if [[ "$DEPLOY_STAGE" == "true" ]]; then
+            echo ""
+            echo "📤 Building and pushing to STAGE ECR..."
+
+            # 将多行 build args 转换为 --build-arg 参数
+            BUILD_ARGS=""
+            if [[ -n "$STAGE_BUILD_ARGS" ]]; then
+              while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                BUILD_ARGS="$BUILD_ARGS --build-arg $line"
+              done <<< "$STAGE_BUILD_ARGS"
+            fi
+
+            # 添加通用构建参数
+            BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            BUILD_ARGS="$BUILD_ARGS --build-arg USE_CHINA_MIRROR=true"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_COMMIT=${{ github.sha }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_BRANCH=${{ github.ref_name }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_DATE=${BUILD_DATE}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg APP_VERSION=${IMAGE_TAG}"
+
+            echo "📝 Build metadata: commit=${{ github.sha }}, branch=${{ github.ref_name }}, date=${BUILD_DATE}"
+            echo "Build args: $BUILD_ARGS"
+
+            docker buildx build \
+              -f ${{ inputs.dockerfile }} \
+              $BUILD_ARGS \
+              --cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache \
+              --cache-to type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache,mode=max \
+              -t ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$IMAGE_TAG \
+              -t ${{ env.ECR_REGISTRY }}/$STAGE_REPO:latest \
+              -t ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$SHORT_SHA \
+              --push \
+              ${{ inputs.build_context }}
+
+            echo "✅ Stage image pushed"
+          fi
+
+          # Prod 构建
+          if [[ "$DEPLOY_PROD" == "true" ]]; then
+            echo ""
+            echo "📤 Building and pushing to PROD ECR..."
+
+            # 将多行 build args 转换为 --build-arg 参数
+            BUILD_ARGS=""
+            if [[ -n "$PROD_BUILD_ARGS" ]]; then
+              while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                BUILD_ARGS="$BUILD_ARGS --build-arg $line"
+              done <<< "$PROD_BUILD_ARGS"
+            fi
+
+            # 添加通用构建参数
+            BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            BUILD_ARGS="$BUILD_ARGS --build-arg USE_CHINA_MIRROR=true"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_COMMIT=${{ github.sha }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg GIT_BRANCH=${{ github.ref_name }}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_DATE=${BUILD_DATE}"
+            BUILD_ARGS="$BUILD_ARGS --build-arg APP_VERSION=${IMAGE_TAG}"
+
+            echo "📝 Build metadata: commit=${{ github.sha }}, branch=${{ github.ref_name }}, date=${BUILD_DATE}"
+            echo "Build args: $BUILD_ARGS"
+
+            docker buildx build \
+              -f ${{ inputs.dockerfile }} \
+              $BUILD_ARGS \
+              --cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$PROD_REPO:buildcache \
+              --cache-to type=registry,ref=${{ env.ECR_REGISTRY }}/$PROD_REPO:buildcache,mode=max \
+              -t ${{ env.ECR_REGISTRY }}/$PROD_REPO:$IMAGE_TAG \
+              -t ${{ env.ECR_REGISTRY }}/$PROD_REPO:latest \
+              -t ${{ env.ECR_REGISTRY }}/$PROD_REPO:$SHORT_SHA \
+              --push \
+              ${{ inputs.build_context }}
+
+            echo "✅ Prod image pushed"
+          fi
+
+          echo ""
+          echo "✅ Build and push completed"
+
+  # ==============================================================================
+  # Deploy Stage
+  # ==============================================================================
+  deploy-stage:
+    name: Deploy to Stage
+    needs: [check-trigger, build]
+    if: |
+      always() &&
+      needs.check-trigger.outputs.deploy_stage == 'true' &&
+      (needs.build.result == 'success' || needs.check-trigger.outputs.skip_build == 'true')
+    runs-on: optima-stage-host
+    concurrency:
+      group: deploy-${{ inputs.service_name }}-stage
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Export Task Definition
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${SERVICE_NAME}-stage \
+            --query taskDefinition \
+            --region ${{ env.AWS_REGION }} > task-def.json
+
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            task-def.json > task-definition.json
+
+      - name: Render Task Definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ inputs.service_name }}
+          image: ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}-stage-ecs:${{ needs.check-trigger.outputs.image_tag }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ inputs.service_name }}-stage
+          cluster: ${{ env.STAGE_CLUSTER }}
+          wait-for-service-stability: false
+
+      - name: Health check
+        env:
+          HEALTH_URL: https://${{ needs.check-trigger.outputs.stage_domain }}${{ inputs.health_check_path }}
+        run: |
+          echo "Checking health at: $HEALTH_URL"
+          for i in {1..30}; do
+            if curl -f -s "$HEALTH_URL" > /dev/null; then
+              echo "✅ Stage health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i/30: Service not ready yet..."
+            sleep 10
+          done
+          echo "❌ Health check failed"
+          exit 1
+
+  # ==============================================================================
+  # Deploy Prod
+  # ==============================================================================
+  deploy-prod:
+    name: Deploy to Prod
+    needs: [check-trigger, build]
+    if: |
+      always() &&
+      needs.check-trigger.outputs.deploy_prod == 'true' &&
+      (needs.build.result == 'success' || needs.check-trigger.outputs.skip_build == 'true')
+    runs-on: optima-prod-host
+    environment: aws-ec2-1az-prod
+    concurrency:
+      group: deploy-${{ inputs.service_name }}-prod
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Export Task Definition
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${SERVICE_NAME}-prod \
+            --query taskDefinition \
+            --region ${{ env.AWS_REGION }} > task-def.json
+
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            task-def.json > task-definition.json
+
+      - name: Render Task Definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ inputs.service_name }}
+          image: ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}-prod-ecs:${{ needs.check-trigger.outputs.image_tag }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ inputs.service_name }}-prod
+          cluster: ${{ env.PROD_CLUSTER }}
+          wait-for-service-stability: false
+
+      - name: Health check
+        env:
+          HEALTH_URL: https://${{ needs.check-trigger.outputs.prod_domain }}${{ inputs.health_check_path }}
+        run: |
+          echo "Checking health at: $HEALTH_URL"
+          for i in {1..30}; do
+            if curl -f -s "$HEALTH_URL" > /dev/null; then
+              echo "✅ Prod health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i/30: Service not ready yet..."
+            sleep 10
+          done
+          echo "❌ Health check failed"
+          exit 1
+
+  # ==============================================================================
+  # Summary
+  # ==============================================================================
+  summary:
+    name: Deployment Summary
+    needs: [check-trigger, build, deploy-stage, deploy-prod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "=== Vite Deployment Summary ==="
+          echo "Service: ${{ inputs.service_name }}"
+          echo "Environment: ${{ needs.check-trigger.outputs.environment }}"
+          echo "Image Tag: ${{ needs.check-trigger.outputs.image_tag }}"
+          echo ""
+          echo "Results:"
+          echo "  Build: ${{ needs.build.result || 'skipped' }}"
+          echo "  Stage: ${{ needs.deploy-stage.result || 'skipped' }}"
+          echo "  Prod:  ${{ needs.deploy-prod.result || 'skipped' }}"
+          echo ""
+          if [[ "${{ needs.check-trigger.outputs.deploy_stage }}" == "true" ]]; then
+            echo "Stage URL: https://${{ needs.check-trigger.outputs.stage_domain }}"
+          fi
+          if [[ "${{ needs.check-trigger.outputs.deploy_prod }}" == "true" ]]; then
+            echo "Prod URL: https://${{ needs.check-trigger.outputs.prod_domain }}"
+          fi
