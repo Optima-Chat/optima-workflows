@@ -283,6 +283,30 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Install Infisical CLI
+        run: |
+          curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
+          sudo apt-get update && sudo apt-get install -y infisical
+
+      - name: Load Infisical credentials from SSM
+        run: |
+          echo "📡 Loading Infisical credentials from SSM..."
+          INFISICAL_CLIENT_ID=$(aws ssm get-parameter \
+            --name /optima/shared/infisical/client-id \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+          INFISICAL_CLIENT_SECRET=$(aws ssm get-parameter \
+            --name /optima/shared/infisical/client-secret \
+            --with-decryption \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+          INFISICAL_PROJECT_ID=$(aws ssm get-parameter \
+            --name /optima/shared/infisical/project-id \
+            --query Parameter.Value --output text --region ${{ env.AWS_REGION }})
+
+          echo "INFISICAL_CLIENT_ID=$INFISICAL_CLIENT_ID" >> $GITHUB_ENV
+          echo "INFISICAL_CLIENT_SECRET=$INFISICAL_CLIENT_SECRET" >> $GITHUB_ENV
+          echo "INFISICAL_PROJECT_ID=$INFISICAL_PROJECT_ID" >> $GITHUB_ENV
+          echo "✅ Infisical credentials loaded"
+
       - name: Build and push Docker image
         env:
           SERVICE_NAME: ${{ inputs.service_name }}
@@ -303,13 +327,43 @@ jobs:
           echo "📄 Using Dockerfile: ${{ inputs.dockerfile }}"
           echo "📁 Build context: ${{ inputs.build_context }}"
 
+          # 从 Infisical 获取 NEXT_PUBLIC_* 环境变量的函数
+          get_infisical_build_args() {
+            local env_name=$1
+            local service_path="/services/${SERVICE_NAME}"
+
+            echo "📦 Fetching NEXT_PUBLIC_* vars from Infisical (env: $env_name, path: $service_path)..." >&2
+
+            # 登录 Infisical
+            export INFISICAL_TOKEN=$(infisical login --method=universal-auth \
+              --client-id="${INFISICAL_CLIENT_ID}" \
+              --client-secret="${INFISICAL_CLIENT_SECRET}" \
+              --domain="https://secrets.optima.onl" \
+              --silent 2>/dev/null)
+
+            # 获取所有 secrets 并过滤 NEXT_PUBLIC_* 变量
+            infisical secrets list \
+              --projectId="${INFISICAL_PROJECT_ID}" \
+              --env="$env_name" \
+              --path="$service_path" \
+              --domain="https://secrets.optima.onl" \
+              --token="${INFISICAL_TOKEN}" \
+              --plain 2>/dev/null | grep "^NEXT_PUBLIC_" | while read -r line; do
+                key=$(echo "$line" | cut -d'=' -f1)
+                value=$(echo "$line" | cut -d'=' -f2-)
+                echo "--build-arg ${key}=${value}"
+              done
+          }
+
           # Stage 构建
           if [[ "$DEPLOY_STAGE" == "true" ]]; then
             echo ""
             echo "📤 Building and pushing to STAGE ECR..."
 
-            # 将多行 build args 转换为 --build-arg 参数
-            BUILD_ARGS=""
+            # 先从 Infisical 获取 NEXT_PUBLIC_* 变量
+            BUILD_ARGS=$(get_infisical_build_args "staging")
+
+            # 如果还传入了额外的 build args，也添加进去
             if [[ -n "$STAGE_BUILD_ARGS" ]]; then
               while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
@@ -347,8 +401,10 @@ jobs:
             echo ""
             echo "📤 Building and pushing to PROD ECR..."
 
-            # 将多行 build args 转换为 --build-arg 参数
-            BUILD_ARGS=""
+            # 先从 Infisical 获取 NEXT_PUBLIC_* 变量
+            BUILD_ARGS=$(get_infisical_build_args "production")
+
+            # 如果还传入了额外的 build args，也添加进去
             if [[ -n "$PROD_BUILD_ARGS" ]]; then
               while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
