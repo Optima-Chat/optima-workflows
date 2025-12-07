@@ -285,8 +285,23 @@ jobs:
 
       - name: Install Infisical CLI
         run: |
-          curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
-          sudo apt-get update && sudo apt-get install -y infisical
+          # 检查是否已安装
+          if command -v infisical &> /dev/null; then
+            echo "✅ Infisical CLI already installed: $(infisical --version)"
+            exit 0
+          fi
+
+          # 直接下载二进制文件（不需要 root 权限）
+          INFISICAL_VERSION="0.41.90"
+          curl -sSL -o /tmp/infisical.tar.gz \
+            "https://github.com/Infisical/infisical/releases/download/infisical-cli%2Fv${INFISICAL_VERSION}/infisical_${INFISICAL_VERSION}_linux_amd64.tar.gz"
+
+          mkdir -p $HOME/.local/bin
+          tar -xzf /tmp/infisical.tar.gz -C $HOME/.local/bin infisical
+          rm /tmp/infisical.tar.gz
+
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "✅ Infisical CLI installed: $($HOME/.local/bin/infisical --version)"
 
       - name: Load Infisical credentials from SSM
         run: |
