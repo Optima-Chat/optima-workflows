@@ -365,17 +365,25 @@ jobs:
               --silent 2>/dev/null)
 
             # 获取所有 secrets 并过滤 NEXT_PUBLIC_* 变量
-            infisical secrets list \
+            # 使用 sed 直接输出 --build-arg 格式，避免 subshell 问题
+            # sed 保留第一个 = 后的所有内容（包括值中的 =）
+            local result=$(infisical secrets list \
               --projectId="${INFISICAL_PROJECT_ID}" \
               --env="$env_name" \
               --path="$service_path" \
               --domain="https://secrets.optima.onl" \
               --token="${INFISICAL_TOKEN}" \
-              --plain 2>/dev/null | grep "^NEXT_PUBLIC_" | while read -r line; do
-                key=$(echo "$line" | cut -d'=' -f1)
-                value=$(echo "$line" | cut -d'=' -f2-)
-                echo "--build-arg ${key}=${value}"
+              --plain 2>/dev/null | grep "^NEXT_PUBLIC_" | sed 's/^/--build-arg /')
+
+            if [[ -n "$result" ]]; then
+              echo "✅ Found NEXT_PUBLIC_* variables:" >&2
+              echo "$result" | while read -r arg; do
+                echo "   ${arg#--build-arg }" >&2
               done
+              echo "$result"
+            else
+              echo "⚠️ No NEXT_PUBLIC_* variables found in Infisical (env: $env_name, path: $service_path)" >&2
+            fi
           }
 
           # Stage 构建
