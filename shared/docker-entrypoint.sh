@@ -2,9 +2,10 @@
 # ==============================================================================
 # Universal Docker Entrypoint for ECS Deployment
 # 使用 Infisical CLI 获取 secrets 并注入环境变量
+# 支持 EFS 缓存 fallback（当 Infisical 不可用时）
 #
 # 来源: https://github.com/Optima-Chat/optima-workflows/blob/main/shared/docker-entrypoint.sh
-# 版本: 1.0.0
+# 版本: 2.0.0
 #
 # 使用场景：
 # - ECS 部署：设置 USE_INFISICAL_CLI=true，脚本从 Infisical 获取 secrets
@@ -14,18 +15,67 @@
 # - INFISICAL_CLIENT_ID      Machine Identity Client ID
 # - INFISICAL_CLIENT_SECRET  Machine Identity Client Secret
 # - INFISICAL_PROJECT_ID     Infisical 项目 ID
-# - INFISICAL_PATH           密钥路径，如 /mcp-tools/comfy-mcp
+# - INFISICAL_PATH           密钥路径，如 /services/user-auth
+# - SERVICE_NAME             服务名称，用于 EFS 缓存隔离
 #
 # 可选环境变量：
 # - INFISICAL_ENVIRONMENT    环境名称，默认 staging
 # - INFISICAL_DOMAIN         Infisical 域名，默认 https://secrets.optima.onl
+#
+# EFS 缓存：
+# - 挂载路径: /mnt/secrets-cache
+# - 缓存文件: /mnt/secrets-cache/{SERVICE_NAME}/.env.cache
+# - 每次成功获取后更新缓存
+# - Infisical 不可用时使用缓存启动
 # ==============================================================================
 
 set -e
 
-# 检查是否需要从 Infisical 获取 secrets
+# ==============================================================================
+# EFS 缓存函数
+# ==============================================================================
+
+SERVICE_NAME="${SERVICE_NAME:-unknown}"
+CACHE_DIR="/mnt/secrets-cache/${SERVICE_NAME}"
+CACHE_FILE="${CACHE_DIR}/.env.cache"
+
+# 更新缓存
+update_cache() {
+    # 检查 EFS 是否挂载
+    if [ ! -d "/mnt/secrets-cache" ]; then
+        echo "⚠️  Warning: /mnt/secrets-cache not mounted, skipping cache update"
+        return 1
+    fi
+
+    mkdir -p "$CACHE_DIR" && chmod 700 "$CACHE_DIR"
+
+    infisical export \
+        --projectId="$INFISICAL_PROJECT_ID" \
+        --env="$INFISICAL_ENVIRONMENT" \
+        --path="$INFISICAL_PATH" \
+        --recursive \
+        --format=dotenv > "$CACHE_FILE"
+
+    chmod 600 "$CACHE_FILE"
+    echo "✅ Cache updated (EFS: $CACHE_FILE)"
+}
+
+# 从缓存加载
+load_from_cache() {
+    echo "⚠️  WARNING: Using cached secrets from EFS"
+    echo "    Cache file: $CACHE_FILE"
+    set -a
+    source "$CACHE_FILE"
+    set +a
+}
+
+# ==============================================================================
+# 主逻辑
+# ==============================================================================
+
 if [ "$USE_INFISICAL_CLI" = "true" ]; then
-    echo "=== ECS Mode: Loading secrets from Infisical ==="
+    echo "=== ECS Mode: Infisical with EFS Cache Fallback ==="
+    echo "  Service: $SERVICE_NAME"
 
     # 设置 Infisical 域名（默认使用自建服务）
     INFISICAL_DOMAIN="${INFISICAL_DOMAIN:-https://secrets.optima.onl}"
@@ -41,9 +91,8 @@ if [ "$USE_INFISICAL_CLI" = "true" ]; then
         exit 1
     fi
 
-    # INFISICAL_PATH 必须由各服务指定，不再有默认值
     if [ -z "$INFISICAL_PATH" ]; then
-        echo "ERROR: INFISICAL_PATH is required (e.g., /mcp-tools/comfy-mcp)"
+        echo "ERROR: INFISICAL_PATH is required (e.g., /services/user-auth)"
         exit 1
     fi
 
@@ -60,29 +109,44 @@ if [ "$USE_INFISICAL_CLI" = "true" ]; then
     # 设置 Infisical API URL（用于 self-hosted 实例）
     export INFISICAL_API_URL="$INFISICAL_DOMAIN"
 
-    # 步骤 1: 使用 Universal Auth 登录获取 token
-    echo "🔐 Logging in to Infisical..."
-    export INFISICAL_TOKEN=$(infisical login \
+    # 尝试从 Infisical 获取 secrets
+    echo "🔐 Attempting Infisical login..."
+    INFISICAL_TOKEN=$(infisical login \
         --method=universal-auth \
         --client-id="$INFISICAL_CLIENT_ID" \
         --client-secret="$INFISICAL_CLIENT_SECRET" \
         --silent \
-        --plain)
+        --plain 2>/dev/null || echo "")
 
-    if [ -z "$INFISICAL_TOKEN" ]; then
-        echo "❌ ERROR: Failed to obtain Infisical token"
-        exit 1
+    if [ -n "$INFISICAL_TOKEN" ]; then
+        # Infisical 可用
+        echo "✅ Infisical connected"
+        export INFISICAL_TOKEN
+
+        # 更新 EFS 缓存（失败不影响启动）
+        update_cache || echo "⚠️  Cache update failed (continuing anyway)"
+
+        # 使用 infisical run 启动应用
+        exec infisical run \
+            --projectId="$INFISICAL_PROJECT_ID" \
+            --env="$INFISICAL_ENVIRONMENT" \
+            --path="$INFISICAL_PATH" \
+            --recursive \
+            -- "$@"
+    else
+        # Infisical 不可用，尝试使用缓存
+        echo "❌ Infisical unavailable, checking EFS cache..."
+
+        if [ -f "$CACHE_FILE" ]; then
+            load_from_cache
+            exec "$@"
+        else
+            echo "❌ ERROR: No cache available in EFS"
+            echo "   Cache path: $CACHE_FILE"
+            echo "   First deployment requires Infisical to be available"
+            exit 1
+        fi
     fi
-
-    echo "✅ Successfully authenticated with Infisical"
-
-    # 步骤 2: 使用 token 执行命令并注入环境变量
-    exec infisical run \
-        --projectId="$INFISICAL_PROJECT_ID" \
-        --env="$INFISICAL_ENVIRONMENT" \
-        --path="$INFISICAL_PATH" \
-        --recursive \
-        -- "$@"
 else
     # EC2/本地模式：直接执行命令（环境变量由外部注入）
     exec "$@"
