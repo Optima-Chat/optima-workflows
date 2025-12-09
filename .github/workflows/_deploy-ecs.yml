@@ -92,7 +92,7 @@ jobs:
   # ==============================================================================
   check-trigger:
     name: Check Parameters
-    runs-on: ubuntu-latest
+    runs-on: optima-stage-host
     outputs:
       environment: ${{ steps.check.outputs.environment }}
       skip_build: ${{ steps.check.outputs.skip_build }}
@@ -613,7 +613,7 @@ jobs:
     name: Deployment Summary
     needs: [check-trigger, test, build, deploy-stage, deploy-prod]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: optima-stage-host
     steps:
       - name: Summary
         run: |
