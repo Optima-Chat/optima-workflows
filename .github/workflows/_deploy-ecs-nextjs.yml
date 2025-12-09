@@ -81,12 +81,18 @@ on:
         default: '.'
 
       # === Next.js 构建时环境变量 (关键区别) ===
+      # 优先从 Infisical 读取 NEXT_PUBLIC_* 变量
+      # 以下参数仅作为补充或覆盖（不推荐使用）
+      infisical_path:
+        description: 'Infisical 路径（默认 /services/{service_name}）'
+        type: string
+        default: ''
       stage_build_args:
-        description: 'Stage 环境的 NEXT_PUBLIC_* 变量，每行一个 KEY=VALUE'
+        description: 'Stage 环境额外的构建变量（补充 Infisical，不推荐）'
         type: string
         default: ''
       prod_build_args:
-        description: 'Prod 环境的 NEXT_PUBLIC_* 变量，每行一个 KEY=VALUE'
+        description: 'Prod 环境额外的构建变量（补充 Infisical，不推荐）'
         type: string
         default: ''
 
@@ -328,6 +334,7 @@ jobs:
           IMAGE_TAG: ${{ needs.check-trigger.outputs.image_tag }}
           DEPLOY_STAGE: ${{ needs.check-trigger.outputs.deploy_stage }}
           DEPLOY_PROD: ${{ needs.check-trigger.outputs.deploy_prod }}
+          INFISICAL_PATH: ${{ inputs.infisical_path }}
           STAGE_BUILD_ARGS: ${{ inputs.stage_build_args }}
           PROD_BUILD_ARGS: ${{ inputs.prod_build_args }}
           DOCKER_BUILDKIT: 1
@@ -345,7 +352,8 @@ jobs:
           # 从 Infisical 获取 NEXT_PUBLIC_* 环境变量的函数
           get_infisical_build_args() {
             local env_name=$1
-            local service_path="/services/${SERVICE_NAME}"
+            # 支持自定义路径，默认为 /services/${SERVICE_NAME}
+            local service_path="${INFISICAL_PATH:-/services/${SERVICE_NAME}}"
 
             echo "📦 Fetching NEXT_PUBLIC_* vars from Infisical (env: $env_name, path: $service_path)..." >&2
 
