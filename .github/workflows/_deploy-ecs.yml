@@ -92,7 +92,7 @@ jobs:
   # ==============================================================================
   check-trigger:
     name: Check Parameters
-    runs-on: self-hosted
+    runs-on: optima-stage-host
     outputs:
       environment: ${{ steps.check.outputs.environment }}
       skip_build: ${{ steps.check.outputs.skip_build }}
@@ -195,7 +195,7 @@ jobs:
     if: |
       inputs.has_tests == true &&
       needs.check-trigger.outputs.skip_tests != 'true'
-    runs-on: ${{ needs.check-trigger.outputs.deploy_prod == 'true' && 'self-hosted' || 'self-hosted' }}
+    runs-on: optima-stage-host
     concurrency:
       group: test-${{ inputs.service_name }}-${{ github.head_ref || github.sha }}
       cancel-in-progress: true
@@ -279,7 +279,7 @@ jobs:
       always() &&
       needs.check-trigger.outputs.skip_build != 'true' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    runs-on: self-hosted
+    runs-on: optima-stage-host
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -369,7 +369,7 @@ jobs:
       always() &&
       needs.check-trigger.outputs.deploy_stage == 'true' &&
       (needs.build.result == 'success' || needs.check-trigger.outputs.skip_build == 'true')
-    runs-on: self-hosted
+    runs-on: optima-stage-host
     concurrency:
       group: deploy-${{ inputs.service_name }}-stage
       cancel-in-progress: false
@@ -492,7 +492,7 @@ jobs:
       always() &&
       needs.check-trigger.outputs.deploy_prod == 'true' &&
       (needs.build.result == 'success' || needs.check-trigger.outputs.skip_build == 'true')
-    runs-on: self-hosted
+    runs-on: optima-prod-host
     environment: aws-ec2-1az-prod
     concurrency:
       group: deploy-${{ inputs.service_name }}-prod
@@ -613,7 +613,7 @@ jobs:
     name: Deployment Summary
     needs: [check-trigger, test, build, deploy-stage, deploy-prod]
     if: always()
-    runs-on: self-hosted
+    runs-on: optima-stage-host
     steps:
       - name: Summary
         run: |
