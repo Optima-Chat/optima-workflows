@@ -53,7 +53,6 @@ update_cache() {
         --projectId="$INFISICAL_PROJECT_ID" \
         --env="$INFISICAL_ENVIRONMENT" \
         --path="$INFISICAL_PATH" \
-        --recursive \
         --format=dotenv > "$CACHE_FILE"
 
     chmod 600 "$CACHE_FILE"
@@ -131,7 +130,6 @@ if [ "$USE_INFISICAL_CLI" = "true" ]; then
             --projectId="$INFISICAL_PROJECT_ID" \
             --env="$INFISICAL_ENVIRONMENT" \
             --path="$INFISICAL_PATH" \
-            --recursive \
             -- "$@"
     else
         # Infisical 不可用，尝试使用缓存
