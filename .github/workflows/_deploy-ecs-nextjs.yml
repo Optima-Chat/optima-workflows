@@ -474,6 +474,12 @@ jobs:
           echo ""
           echo "✅ Build and push completed"
 
+          # 清理 buildx 缓存和可能残留的镜像
+          echo "🧹 Cleaning up buildx cache and local images..."
+          docker buildx prune -f --filter "until=72h" || true
+          docker image prune -f --filter "until=24h" || true
+          echo "✅ Cleanup completed"
+
   # ==============================================================================
   # Deploy Stage
   # ==============================================================================

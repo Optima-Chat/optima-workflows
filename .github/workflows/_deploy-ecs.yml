@@ -359,6 +359,21 @@ jobs:
 
           echo "✅ Build and push completed"
 
+          # 清理本地镜像（已推送到 ECR，本地不再需要）
+          echo "🧹 Cleaning up local images..."
+          docker rmi local-build:latest || true
+          if [[ "$DEPLOY_STAGE" == "true" ]]; then
+            docker rmi ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$IMAGE_TAG || true
+            docker rmi ${{ env.ECR_REGISTRY }}/$STAGE_REPO:latest || true
+            docker rmi ${{ env.ECR_REGISTRY }}/$STAGE_REPO:$SHORT_SHA || true
+          fi
+          if [[ "$DEPLOY_PROD" == "true" ]]; then
+            docker rmi ${{ env.ECR_REGISTRY }}/$PROD_REPO:$IMAGE_TAG || true
+            docker rmi ${{ env.ECR_REGISTRY }}/$PROD_REPO:latest || true
+            docker rmi ${{ env.ECR_REGISTRY }}/$PROD_REPO:$SHORT_SHA || true
+          fi
+          echo "✅ Cleanup completed"
+
   # ==============================================================================
   # Deploy Stage
   # ==============================================================================
