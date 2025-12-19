@@ -59,6 +59,10 @@ on:
         description: 'Dockerfile 路径（默认 Dockerfile）'
         type: string
         default: 'Dockerfile'
+      no_cache:
+        description: '禁用 Docker 构建缓存（用于强制刷新依赖）'
+        type: boolean
+        default: false
 
       # === 多镜像支持 ===
       images:
@@ -321,6 +325,16 @@ jobs:
           echo "🔨 Building image for ${SERVICE_NAME}..."
           echo "📄 Using Dockerfile: ${{ inputs.dockerfile }}"
           echo "📝 Build metadata: commit=${{ github.sha }}, branch=${{ github.ref_name }}, date=${BUILD_DATE}"
+
+          # 构建缓存参数
+          CACHE_ARGS=""
+          if [[ "${{ inputs.no_cache }}" == "true" ]]; then
+            echo "⚠️ Cache disabled (no_cache=true)"
+            CACHE_ARGS="--no-cache"
+          else
+            CACHE_ARGS="--cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache --cache-to type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache,mode=max"
+          fi
+
           docker buildx build \
             -f ${{ inputs.dockerfile }} \
             --build-arg INSTALL_INFISICAL=true \
@@ -329,8 +343,7 @@ jobs:
             --build-arg GIT_BRANCH=${{ github.ref_name }} \
             --build-arg BUILD_DATE=${BUILD_DATE} \
             --build-arg APP_VERSION=${IMAGE_TAG} \
-            --cache-from type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache \
-            --cache-to type=registry,ref=${{ env.ECR_REGISTRY }}/$STAGE_REPO:buildcache,mode=max \
+            $CACHE_ARGS \
             --load \
             -t local-build:latest \
             .
