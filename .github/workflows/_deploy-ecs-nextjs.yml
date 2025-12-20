@@ -436,7 +436,7 @@ jobs:
             echo "📤 Building and pushing to PROD ECR..."
 
             # 先从 Infisical 获取 NEXT_PUBLIC_* 变量
-            BUILD_ARGS=$(get_infisical_build_args "production")
+            BUILD_ARGS=$(get_infisical_build_args "prod")
 
             # 如果还传入了额外的 build args，也添加进去
             if [[ -n "$PROD_BUILD_ARGS" ]]; then
