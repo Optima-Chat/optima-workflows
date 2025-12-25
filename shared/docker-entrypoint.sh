@@ -53,6 +53,8 @@ update_cache() {
         --projectId="$INFISICAL_PROJECT_ID" \
         --env="$INFISICAL_ENVIRONMENT" \
         --path="$INFISICAL_PATH" \
+        --recursive \
+        --expand \
         --format=dotenv > "$CACHE_FILE"
 
     chmod 600 "$CACHE_FILE"
@@ -126,10 +128,14 @@ if [ "$USE_INFISICAL_CLI" = "true" ]; then
         update_cache || echo "⚠️  Cache update failed (continuing anyway)"
 
         # 使用 infisical run 启动应用
+        # --recursive: 递归获取子目录 secrets
+        # --expand: 展开 secret 引用（如 ${prod.shared-secrets.xxx}）
         exec infisical run \
             --projectId="$INFISICAL_PROJECT_ID" \
             --env="$INFISICAL_ENVIRONMENT" \
             --path="$INFISICAL_PATH" \
+            --recursive \
+            --expand \
             -- "$@"
     else
         # Infisical 不可用，尝试使用缓存
